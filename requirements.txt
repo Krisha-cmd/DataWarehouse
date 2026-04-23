@@ -1,0 +1,7 @@
+pandas
+requests
+hdfs
+kagglehub
+pyspark==3.5.1
+pyhive[hive]
+thrift

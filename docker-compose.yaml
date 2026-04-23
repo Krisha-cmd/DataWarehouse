@@ -49,8 +49,8 @@ x-airflow-common:
   # In order to add custom dependencies or upgrade provider packages you can use your extended image.
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.0}
-  # build: .
+  image: ${AIRFLOW_IMAGE_NAME:-airflow-hdfs-airflow:2.9.0}
+  build: .
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -59,13 +59,15 @@ x-airflow-common:
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     # yamllint disable rule:line-length
     # Use simple http server on scheduler for health checks
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
     # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    HADOOP_CONF_DIR: /opt/airflow/config/spark
+    SPARK_CONF_DIR: /opt/airflow/config/spark
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
@@ -86,6 +88,115 @@ x-airflow-common:
       condition: service_healthy
 
 services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop2.7.4-java8
+    container_name: namenode
+    restart: always
+    ports:
+      - "9870:9870"
+      - "8020:8020"
+    environment:
+      - CLUSTER_NAME=airflow-hdfs
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop2.7.4-java8
+    container_name: datanode
+    restart: always
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+    ports:
+      - "9864:9864"
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    depends_on:
+      - namenode
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    command: /opt/hive/bin/hive --service metastore
+    environment:
+      - HIVE_CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - SERVICE_PRECONDITION=namenode:9870 postgres:5432
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionURL=jdbc:postgresql://postgres/hive_metastore
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName=org.postgresql.Driver
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName=hive
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword=hive
+      - HIVE_SITE_CONF_datanucleus_autoCreateSchema=true
+    ports:
+      - "9083:9083"
+    depends_on:
+      - namenode
+      - postgres
+
+  hive-server:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-server
+    command: /opt/hive/bin/hiveserver2
+    environment:
+      - HIVE_CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - SERVICE_PRECONDITION=hive-metastore:9083
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionURL=jdbc:postgresql://postgres/hive_metastore
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName=org.postgresql.Driver
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName=hive
+      - HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword=hive
+      - HIVE_SITE_CONF_hive_server2_enable_doAs=false
+    ports:
+      - "10000:10000"
+    depends_on:
+      - hive-metastore
+    volumes:
+      - ./hql:/opt/hive/hql
+
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_CONF_DIR: /opt/spark/conf
+      HADOOP_CONF_DIR: /opt/spark/conf
+    ports:
+      - "7077:7077"
+      - "8081:8080"
+    volumes:
+      - ./config/spark:/opt/spark/conf
+    depends_on:
+      - namenode
+      - hive-metastore
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_CONF_DIR: /opt/spark/conf
+      HADOOP_CONF_DIR: /opt/spark/conf
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 2G
+    ports:
+      - "8082:8081"
+    volumes:
+      - ./config/spark:/opt/spark/conf
+    depends_on:
+      - spark-master
+      
   postgres:
     image: postgres:13
     environment:
@@ -94,6 +205,7 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+      - ./init-hive-db.sql:/docker-entrypoint-initdb.d/init-hive-db.sql
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 10s
@@ -282,5 +394,47 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  superset-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    container_name: superset-init
+    environment:
+      - SUPERSET_SECRET_KEY=airflow_hdfs_superset_secret
+      - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://superset:superset@postgres/superset
+      - SUPERSET_LOAD_EXAMPLES=false
+    volumes:
+      - ./superset:/app/pythonpath
+    command: bash /app/pythonpath/init.sh
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    container_name: superset
+    environment:
+      - SUPERSET_SECRET_KEY=airflow_hdfs_superset_secret
+      - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://superset:superset@postgres/superset
+      - SUPERSET_LOAD_EXAMPLES=false
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./superset:/app/pythonpath
+      - superset_home:/app/superset_home
+    ports:
+      - "8088:8088"
+    restart: unless-stopped
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      hive-server:
+        condition: service_started
+
 volumes:
   postgres-db-volume:
+  hadoop_namenode:
+  hadoop_datanode:
+  superset_home:

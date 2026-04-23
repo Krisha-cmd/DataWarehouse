@@ -1,0 +1,14 @@
+FROM apache/superset:latest
+
+USER root
+
+# The Superset image uses `uv` to manage /app/.venv (include-system-site-packages=false).
+# Install into the venv via `uv pip install --python /app/.venv`.
+# psycopg2-binary: postgres metadata DB backend.
+# pyhive + thrift: Hive SQLAlchemy dialect (no SASL needed, doAs=false).
+RUN uv pip install --python /app/.venv --no-cache-dir \
+    psycopg2-binary \
+    pyhive \
+    thrift
+
+USER superset
