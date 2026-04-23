@@ -130,7 +130,10 @@ docker compose ps
 
 ### Step 5 — Initialize the Hive metastore schema
 
-This is a one-time step. It populates the Hive schema tables in postgres.
+> **One-time only.** Skip this step if the `hive_metastore` postgres database already
+> has tables (i.e. you have run this before). Running `-initSchema` a second time
+> produces `relation "BUCKETING_COLS" already exists` and fails — that is expected.
+> To check whether the schema is already present, run `-validate` instead (see below).
 
 ```powershell
 docker compose up -d hive-metastore hive-server
@@ -144,8 +147,11 @@ docker exec hive-server /opt/hive/bin/schematool -dbType postgres -initSchema
 
 Expected output: `schemaTool completed`
 
-> On subsequent restarts you do **not** need to run schematool again. The schema
-> persists in the `hive_metastore` postgres database.
+To verify an existing schema is healthy (safe to run any time):
+
+```powershell
+docker exec hive-server /opt/hive/bin/schematool -dbType postgres -validate
+```
 
 ### Step 6 — Start the full stack
 
@@ -394,6 +400,15 @@ docker compose restart superset
 ---
 
 ## Troubleshooting
+
+### `schematool -initSchema` fails with "relation already exists"
+
+This means the schema was already initialized successfully. It is safe to ignore.
+Run `-validate` instead to confirm the schema is healthy:
+
+```powershell
+docker exec hive-server /opt/hive/bin/schematool -dbType postgres -validate
+```
 
 ### `ModuleNotFoundError: No module named 'hdfs'` in Airflow tasks
 
